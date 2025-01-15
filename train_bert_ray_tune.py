@@ -29,8 +29,8 @@ datasets = load_scan_dataset('data/simple_split/tasks_train_simple.txt',
 tokenizer = BertTokenizer.from_pretrained('bert-base-cased', force_download=False)
 def tokenize_function(example):
     inputs = dict()
-    input_str = [example["input"][idx] + tokenizer.sep_token + (' ' + tokenizer.mask_token) * MAX_LENGTH for idx in range(len(example["input"]))]
-    output_str = [example["input"][idx] + tokenizer.sep_token + example["output"][idx] + (' ' + tokenizer.sep_token) * MAX_LENGTH for idx in range(len(example["input"]))]
+    input_str = [example["input"][id] + tokenizer.sep_token + (' ' + tokenizer.mask_token) * MAX_LENGTH for id in range(len(example["input"]))]
+    output_str = [example["input"][id] + tokenizer.sep_token + example["output"][id] + (' ' + tokenizer.sep_token) * MAX_LENGTH for id in range(len(example["input"]))]
 
     input_tokens = tokenizer(input_str, 
                             return_tensors='pt',
