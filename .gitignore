@@ -172,4 +172,5 @@ logs/
 # PyPI configuration file
 .pypirc
 data/
-
+models/
+logs/
