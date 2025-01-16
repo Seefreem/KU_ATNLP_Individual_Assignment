@@ -1,12 +1,26 @@
+from collections import defaultdict
 from datasets import load_dataset
 import random
 from datasets import Dataset
 from datasets import DatasetDict
 import torch
+import json
+from torch.utils.data import DataLoader
+from pprint import pprint
+import torch
+from tqdm import tqdm
+from transformers import BertTokenizer, DataCollatorWithPadding
+
+# tokenizer = BertTokenizer.from_pretrained('bert-base-cased', force_download=False)
+from transformers import BertForMaskedLM
+
+
 gpu = torch.cuda.is_available()
 device = torch.device("cuda:0" if gpu else "cpu")
 print(device)
 MAX_LENGTH = 512
+oracle = 1 # 1 hint; 2 mask
+model_path = "./bert_finetuned/bert_finetuned_0_oracle/"
 
 # Define a function to process each example
 def process_example(example):
@@ -29,23 +43,34 @@ print(datasets, datasets['train'][0])
 
 
 
-from transformers import BertTokenizer, DataCollatorWithPadding
 
-# tokenizer = BertTokenizer.from_pretrained('bert-base-cased', force_download=False)
-from transformers import BertForMaskedLM
-model = BertForMaskedLM.from_pretrained("./models/checkpoint-5000", force_download=False)
+# model = BertForMaskedLM.from_pretrained(model_path, force_download=False)
 model = BertForMaskedLM.from_pretrained(
-    "./models/checkpoint-5000",
+    model_path,
     torch_dtype=torch.bfloat16,
     device_map="cpu",
 )
-tokenizer = BertTokenizer.from_pretrained("./models/checkpoint-5000")
-
+tokenizer = BertTokenizer.from_pretrained(model_path)
 
 def tokenize_function(example):
     inputs = dict()
-    input_str = [example["input"][idx] + tokenizer.sep_token + (' ' + tokenizer.mask_token) * MAX_LENGTH for idx in range(len(example["input"]))]
-    output_str = [example["input"][idx] + tokenizer.sep_token + example["output"][idx] + (' ' + tokenizer.sep_token) * MAX_LENGTH for idx in range(len(example["input"]))]
+    input_str = []
+    output_str = []
+    if oracle == 1:
+        input_str = [example["input"][id] + " [hint: target sequence length:"+str(len(tokenizer.tokenize(example["output"][id])))+"] "+ 
+                        tokenizer.sep_token + (' ' + tokenizer.mask_token) * MAX_LENGTH for id in range(len(example["input"]))]
+        output_str = [example["input"][id] +  " [hint: target sequence length:"+str(len(tokenizer.tokenize(example["output"][id])))+"] "+ 
+                        tokenizer.sep_token + example["output"][id] + (' ' + tokenizer.sep_token) * MAX_LENGTH for id in range(len(example["input"]))]
+    elif oracle == 2:
+        for id in range(len(example["input"])):
+            mask_tokens = (' ' + tokenizer.mask_token) * len(tokenizer.tokenize(example["output"][id]))
+            input_str.append (example["input"][id] + tokenizer.sep_token + mask_tokens + (' ' + tokenizer.sep_token) * MAX_LENGTH)
+            output_str.append(example["input"][id] + tokenizer.sep_token + example["output"][id] + (' ' + tokenizer.sep_token) * MAX_LENGTH)
+        # print(input_str[0])
+        # print(output_str[0])
+    else:
+        input_str = [example["input"][id] + tokenizer.sep_token + (' ' + tokenizer.mask_token) * MAX_LENGTH for id in range(len(example["input"]))]
+        output_str = [example["input"][id] + tokenizer.sep_token + example["output"][id] + (' ' + tokenizer.sep_token) * MAX_LENGTH for id in range(len(example["input"]))]
 
     input_tokens = tokenizer(input_str, 
                             return_tensors='pt',
@@ -57,7 +82,8 @@ def tokenize_function(example):
                             padding=True,
                             truncation=True,
                             max_length=MAX_LENGTH)
-    
+    # print(input_str[0])
+    # print(output_str[0])
     inputs.update(input_tokens)
     inputs['labels'] = output_tokens['input_ids']
     for idx in range(len(inputs['labels'])):
@@ -68,7 +94,8 @@ def tokenize_function(example):
             else:
                 inputs['labels'][idx][i] = -100
                 break
-
+    # print(tokenizer.convert_ids_to_tokens(inputs['input_ids'][0]))
+    # print(tokenizer.convert_ids_to_tokens(inputs['labels'][0]))
 
     return inputs
 tokenized_datasets = dict()
@@ -79,7 +106,7 @@ tokenized_datasets['test'] = datasets['test'].map(tokenize_function,
 data_collator = DataCollatorWithPadding(tokenizer=tokenizer, max_length=512, padding=True)
 
 
-from collections import defaultdict
+
 
 def calculate_accuracies(predictions, targets, input_lengths, label_lengths):
     """
@@ -178,10 +205,7 @@ def convert_string(source_string):
     return combined_words
 
 
-from torch.utils.data import DataLoader
-from pprint import pprint
-import torch
-from tqdm import tqdm
+
 # Evaluation
 def evaluation(dataset, model, batch_size, tokenizer):
     data_loader = DataLoader(dataset, # tokenized_datasets['test'].with_format("torch") 
@@ -203,7 +227,7 @@ def evaluation(dataset, model, batch_size, tokenizer):
             outputs = model(**data, return_dict=True)  
             # Greedy sampling
             prediction = outputs.logits.argmax(dim=-1)
-            outputs_logits.append(outputs.logits.detach().cpu())
+            # outputs_logits.append(outputs.logits.detach().cpu())
             # Truncation according to the length of labels
             for batch_idx in range(len(data['labels'])):
                 target = []
@@ -233,16 +257,16 @@ def evaluation(dataset, model, batch_size, tokenizer):
                             predictions.append(pre_seq)
                             break
                         target.append(data['labels'][batch_idx][i].cpu().item())
-                        labels.append(data['labels'][batch_idx].cpu())
+                        # labels.append(data['labels'][batch_idx].cpu())
                         pre.append(prediction[batch_idx][i].cpu().item())     
                    
         label_lengths = [len(label_seq) for label_seq in targets]
-        outputs_logits = torch.cat(outputs_logits, dim=0)
-        labels = torch.cat(labels, dim=0)
+        # outputs_logits = torch.cat(outputs_logits, dim=0)
+        # labels = torch.cat(labels, dim=0)
     return {
         'acc': calculate_accuracies(predictions, targets, input_lengths, label_lengths),
-        'outputs_logits': outputs_logits,
-        'labels': labels
+        # 'outputs_logits': outputs_logits,
+        # 'labels': labels
     }
 
 
@@ -251,62 +275,64 @@ result_dict = evaluation(tokenized_datasets['test'].with_format("torch"),
 
 
 # Save to files
-torch.save(result_dict['outputs_logits'], "outputs_logits.pt")
-torch.save(result_dict['labels'], "labels.pt")
+# torch.save(result_dict['outputs_logits'], "outputs_logits.pt")
+# torch.save(result_dict['labels'], "labels.pt")
+with open('acc_dict_with_oracle.json', 'w') as f:
+    json.dump(result_dict, f, indent=4)
 results = result_dict['acc']
 print(results)
 
-import matplotlib.pyplot as plt
-def plot_acc(action_sequence_length, accuracy, xlabel, ylabel, title, file_name):
-    # Create the plot
-    fig, ax1 = plt.subplots(figsize=(8, 6))  # Set figure size
+# import matplotlib.pyplot as plt
+# def plot_acc(action_sequence_length, accuracy, xlabel, ylabel, title, file_name):
+#     # Create the plot
+#     fig, ax1 = plt.subplots(figsize=(8, 6))  # Set figure size
 
-    # Plot bar chart
-    ax1.bar(action_sequence_length, accuracy, width=1.0, edgecolor='black')
+#     # Plot bar chart
+#     ax1.bar(action_sequence_length, accuracy, width=1.0, edgecolor='black')
 
-    # Customize axes and labels
-    ax1.set_xlabel(xlabel)
-    ax1.set_ylabel(ylabel, color="black")
-    ax1.set_title(title)
+#     # Customize axes and labels
+#     ax1.set_xlabel(xlabel)
+#     ax1.set_ylabel(ylabel, color="black")
+#     ax1.set_title(title)
 
-    # Add gridlines for better readability
-    ax1.grid(axis='y', linestyle='--', alpha=0.7)
+#     # Add gridlines for better readability
+#     ax1.grid(axis='y', linestyle='--', alpha=0.7)
 
-    # Save the plot as an image file
-    plt.savefig(file_name, dpi=300, format="pdf", bbox_inches='tight')
+#     # Save the plot as an image file
+#     plt.savefig(file_name, dpi=300, format="pdf", bbox_inches='tight')
 
-    # Display the plot
-    # plt.show()
+#     # Display the plot
+#     # plt.show()
 
 
-accuracy_token_acc_len = list(results['token_accuracy_wrt_label_length'].keys())
-accuracy_token_acc_action = [results['token_accuracy_wrt_label_length'][len] for len in accuracy_token_acc_len]
-plot_acc(accuracy_token_acc_len, accuracy_token_acc_action, 
-    "Ground-Truth Action Sequence Length (in words)", 
-    '"Accuracy on New Commands (%)"', 
-    "Token-Level Accuracy by Action Sequence Length", 
-    'accuracy_token_acc_action')
+# accuracy_token_acc_len = list(results['token_accuracy_wrt_label_length'].keys())
+# accuracy_token_acc_action = [results['token_accuracy_wrt_label_length'][len] for len in accuracy_token_acc_len]
+# plot_acc(accuracy_token_acc_len, accuracy_token_acc_action, 
+#     "Ground-Truth Action Sequence Length (in words)", 
+#     '"Accuracy on New Commands (%)"', 
+#     "Token-Level Accuracy by Action Sequence Length", 
+#     'accuracy_token_acc_action')
 
-accuracy_seq_acc_len = list(results['sequence_accuracy_wrt_label_length'].keys())
-accuracy_seq_acc_action = [results['sequence_accuracy_wrt_label_length'][len] for len in accuracy_seq_acc_len]
-plot_acc(accuracy_seq_acc_len, accuracy_seq_acc_action, 
-    "Ground-Truth Action Sequence Length (in words)", 
-    '"Accuracy on New Commands (%)"', 
-    "Sequence-Level Accuracy by Action Sequence Length", 
-    'accuracy_seq_acc_action')
+# accuracy_seq_acc_len = list(results['sequence_accuracy_wrt_label_length'].keys())
+# accuracy_seq_acc_action = [results['sequence_accuracy_wrt_label_length'][len] for len in accuracy_seq_acc_len]
+# plot_acc(accuracy_seq_acc_len, accuracy_seq_acc_action, 
+#     "Ground-Truth Action Sequence Length (in words)", 
+#     '"Accuracy on New Commands (%)"', 
+#     "Sequence-Level Accuracy by Action Sequence Length", 
+#     'accuracy_seq_acc_action')
 
-accuracy_token_acc_command_len = list(results['token_accuracy_wrt_input_length'].keys())
-accuracy_token_acc_command = [results['token_accuracy_wrt_input_length'][len] for len in accuracy_token_acc_command_len]
-plot_acc(accuracy_token_acc_command_len, accuracy_token_acc_command, 
-    "Command Length (in words)", 
-    '"Accuracy on New Commands (%)"', 
-    "Token-Level Accuracy by Action Sequence Length", 
-    'accuracy_token_acc_command')
+# accuracy_token_acc_command_len = list(results['token_accuracy_wrt_input_length'].keys())
+# accuracy_token_acc_command = [results['token_accuracy_wrt_input_length'][len] for len in accuracy_token_acc_command_len]
+# plot_acc(accuracy_token_acc_command_len, accuracy_token_acc_command, 
+#     "Command Length (in words)", 
+#     '"Accuracy on New Commands (%)"', 
+#     "Token-Level Accuracy by Action Sequence Length", 
+#     'accuracy_token_acc_command')
 
-accuracy_seq_acc_command_len = list(results['sequence_accuracy_wrt_input_length'].keys())
-accuracy_seq_acc_command = [results['sequence_accuracy_wrt_input_length'][len] for len in accuracy_seq_acc_command_len]
-plot_acc(accuracy_seq_acc_command_len, accuracy_seq_acc_command, 
-    "Command Length (in words)", 
-    '"Accuracy on New Commands (%)"', 
-    "Sequence-Level Accuracy by Action Sequence Length", 
-    'accuracy_seq_acc_command')
+# accuracy_seq_acc_command_len = list(results['sequence_accuracy_wrt_input_length'].keys())
+# accuracy_seq_acc_command = [results['sequence_accuracy_wrt_input_length'][len] for len in accuracy_seq_acc_command_len]
+# plot_acc(accuracy_seq_acc_command_len, accuracy_seq_acc_command, 
+#     "Command Length (in words)", 
+#     '"Accuracy on New Commands (%)"', 
+#     "Sequence-Level Accuracy by Action Sequence Length", 
+#     'accuracy_seq_acc_command')
